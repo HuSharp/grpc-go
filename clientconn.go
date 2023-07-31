@@ -756,9 +756,9 @@ func (ac *addrConn) connect() error {
 //
 // If ac is Ready, it checks whether current connected address of ac is in the
 // new addrs list.
-//  - If true, it updates ac.addrs and returns true. The ac will keep using
-//    the existing connection.
-//  - If false, it does nothing and returns false.
+//   - If true, it updates ac.addrs and returns true. The ac will keep using
+//     the existing connection.
+//   - If false, it does nothing and returns false.
 func (ac *addrConn) tryUpdateAddrs(addrs []resolver.Address) bool {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
@@ -997,6 +997,7 @@ func (ac *addrConn) resetTransport() {
 		if i > 0 {
 			ac.cc.resolveNow(resolver.ResolveNowOption{})
 		}
+		grpclog.Info("[resetTransport] retry to dial.")
 
 		ac.mu.Lock()
 		if ac.state == connectivity.Shutdown {

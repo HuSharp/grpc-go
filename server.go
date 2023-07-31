@@ -634,6 +634,7 @@ func (s *Server) Serve(lis net.Listener) error {
 // handleRawConn forks a goroutine to handle a just-accepted connection that
 // has not had any I/O performed on it yet.
 func (s *Server) handleRawConn(rawConn net.Conn) {
+	grpclog.Info("[handleRawConn] check for handleRawConn.")
 	if s.quit.HasFired() {
 		rawConn.Close()
 		return
@@ -704,6 +705,7 @@ func (s *Server) serveStreams(st transport.ServerTransport) {
 	defer st.Close()
 	var wg sync.WaitGroup
 	st.HandleStreams(func(stream *transport.Stream) {
+		grpclog.Info("[serveStreams] check for HandleStreams, method: ", stream.Method())
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -733,12 +735,12 @@ var _ http.Handler = (*Server)(nil)
 // To share one port (such as 443 for https) between gRPC and an
 // existing http.Handler, use a root http.Handler such as:
 //
-//   if r.ProtoMajor == 2 && strings.HasPrefix(
-//   	r.Header.Get("Content-Type"), "application/grpc") {
-//   	grpcServer.ServeHTTP(w, r)
-//   } else {
-//   	yourMux.ServeHTTP(w, r)
-//   }
+//	if r.ProtoMajor == 2 && strings.HasPrefix(
+//		r.Header.Get("Content-Type"), "application/grpc") {
+//		grpcServer.ServeHTTP(w, r)
+//	} else {
+//		yourMux.ServeHTTP(w, r)
+//	}
 //
 // Note that ServeHTTP uses Go's HTTP/2 server implementation which is totally
 // separate from grpc-go's HTTP/2 server. Performance and features may vary
@@ -1451,9 +1453,9 @@ func (s *Server) getCodec(contentSubtype string) baseCodec {
 // SetHeader sets the header metadata.
 // When called multiple times, all the provided metadata will be merged.
 // All the metadata will be sent out when one of the following happens:
-//  - grpc.SendHeader() is called;
-//  - The first response is sent out;
-//  - An RPC status is sent out (error or success).
+//   - grpc.SendHeader() is called;
+//   - The first response is sent out;
+//   - An RPC status is sent out (error or success).
 func SetHeader(ctx context.Context, md metadata.MD) error {
 	if md.Len() == 0 {
 		return nil
