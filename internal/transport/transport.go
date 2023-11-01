@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/net/trace"
 	"io"
 	"net"
 	"sync"
@@ -526,6 +527,7 @@ type ServerConfig struct {
 	ChannelzParentID      int64
 	MaxHeaderListSize     *uint32
 	HeaderTableSize       *uint32
+	Events                trace.EventLog
 }
 
 // NewServerTransport creates a ServerTransport with conn or non-nil error
@@ -696,6 +698,9 @@ type ServerTransport interface {
 
 	// RemoteAddr returns the remote network address.
 	RemoteAddr() net.Addr
+
+	// LocalAddr
+	LocalAddr() net.Addr
 
 	// Drain notifies the client this ServerTransport stops accepting new RPCs.
 	Drain()

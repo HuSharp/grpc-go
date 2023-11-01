@@ -1325,7 +1325,8 @@ func (t *http2Client) keepalive() {
 	// Records the last value of t.lastRead before we go block on the timer.
 	// This is required to check for read activity since then.
 	prevNano := time.Now().UnixNano()
-	timer := time.NewTimer(t.kp.Time)
+	timeChange := t.kp.Time - 2
+	timer := time.NewTimer(timeChange)
 	for {
 		select {
 		case <-timer.C:
@@ -1334,11 +1335,12 @@ func (t *http2Client) keepalive() {
 				// There has been read activity since the last time we were here.
 				outstandingPing = false
 				// Next timer should fire at kp.Time seconds from lastRead time.
-				timer.Reset(time.Duration(lastRead) + t.kp.Time - time.Duration(time.Now().UnixNano()))
+				timer.Reset(time.Duration(lastRead) + timeChange - time.Duration(time.Now().UnixNano()))
 				prevNano = lastRead
 				continue
 			}
 			if outstandingPing && timeoutLeft <= 0 {
+				fmt.Println("client keepalive: closing transport", time.Now(), t.localAddr.String(), t.remoteAddr.String())
 				t.Close()
 				return
 			}
@@ -1354,6 +1356,7 @@ func (t *http2Client) keepalive() {
 				return
 			}
 			if len(t.activeStreams) < 1 && !t.kp.PermitWithoutStream {
+				fmt.Println("client keepalive: entering dormant state", time.Now(), t.localAddr.String(), t.remoteAddr.String())
 				// If a ping was sent out previously (because there were active
 				// streams at that point) which wasn't acked and its timeout
 				// hadn't fired, but we got here and are about to go dormant,
@@ -1373,6 +1376,7 @@ func (t *http2Client) keepalive() {
 				if channelz.IsOn() {
 					atomic.AddInt64(&t.czData.kpCount, 1)
 				}
+				fmt.Println("client keepalive: sending ping", time.Now(), outstandingPing, t.remoteAddr, t.localAddr)
 				t.controlBuf.put(p)
 				timeoutLeft = t.kp.Timeout
 				outstandingPing = true
@@ -1381,9 +1385,10 @@ func (t *http2Client) keepalive() {
 			// timeoutLeft. This will ensure that we wait only for kp.Time
 			// before sending out the next ping (for cases where the ping is
 			// acked).
-			sleepDuration := minTime(t.kp.Time, timeoutLeft)
+			sleepDuration := minTime(timeChange, timeoutLeft)
 			timeoutLeft -= sleepDuration
 			timer.Reset(sleepDuration)
+			fmt.Println("end for timer", timeoutLeft, outstandingPing, t.localAddr.String(), t.remoteAddr.String())
 		case <-t.ctx.Done():
 			if !timer.Stop() {
 				<-timer.C

@@ -150,6 +150,11 @@ func (ht *serverHandlerTransport) closeCloseChanOnce() { close(ht.closedCh) }
 
 func (ht *serverHandlerTransport) RemoteAddr() net.Addr { return strAddr(ht.req.RemoteAddr) }
 
+func (ht *serverHandlerTransport) LocalAddr() net.Addr {
+	println("serverHandlerTransport.LocalAddr() is nil")
+	return nil
+}
+
 // strAddr is a net.Addr backed by either a TCP "ip:port" string, or
 // the empty string if unknown.
 type strAddr string
@@ -415,10 +420,10 @@ func (ht *serverHandlerTransport) Drain() {
 // mapRecvMsgError returns the non-nil err into the appropriate
 // error value as expected by callers of *grpc.parser.recvMsg.
 // In particular, in can only be:
-//   * io.EOF
-//   * io.ErrUnexpectedEOF
-//   * of type transport.ConnectionError
-//   * an error from the status package
+//   - io.EOF
+//   - io.ErrUnexpectedEOF
+//   - of type transport.ConnectionError
+//   - an error from the status package
 func mapRecvMsgError(err error) error {
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
 		return err

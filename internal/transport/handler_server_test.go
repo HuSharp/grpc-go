@@ -39,6 +39,16 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+func TestA(t *testing.T) {
+	err := errors.New("read tcp 127.0.0.1:36447->127.0.0.1:2379: use of closed network connection")
+	extractPortFromErr(err)
+}
+
+func TestB(t *testing.T) {
+	str := "127.0.0.1:2379"
+	extractPort(str)
+}
+
 func TestHandlerTransport_NewServerHandlerTransport(t *testing.T) {
 	type testCase struct {
 		name    string

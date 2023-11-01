@@ -23,10 +23,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/net/trace"
 	"io"
 	"math"
 	"net"
+	"os/exec"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -127,6 +131,9 @@ type http2Server struct {
 	bufferPool *bufferPool
 
 	connectionID uint64
+
+	events  trace.EventLog
+	streams map[uint32]*Stream
 }
 
 // newHTTP2Server constructs a ServerTransport based on HTTP2. ConnectionError is
@@ -237,6 +244,8 @@ func newHTTP2Server(conn net.Conn, config *ServerConfig) (_ ServerTransport, err
 		initialWindowSize: iwz,
 		czData:            new(channelzData),
 		bufferPool:        newBufferPool(),
+		events:            config.Events,
+		streams:           make(map[uint32]*Stream),
 	}
 	t.controlBuf = newControlBuffer(t.done)
 	if dynamicWindow {
@@ -402,6 +411,8 @@ func (t *http2Server) operateHeaders(frame *http2.MetaHeadersFrame, handle func(
 	}
 	t.maxStreamID = streamID
 	t.activeStreams[streamID] = s
+	t.streams[streamID] = s
+	fmt.Println("add stream", s.method, len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 	if len(t.activeStreams) == 1 {
 		t.idle = time.Time{}
 	}
@@ -476,16 +487,20 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 				continue
 			}
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				fmt.Println("[HandleStreams] close stream for EOF|ErrUnexpectedEOF", err)
 				t.Close()
 				return
 			}
+			extractPortFromErr(err)
 			warningf("transport: http2Server.HandleStreams failed to read frame: %v", err)
+			fmt.Println("[HandleStreams] close stream", err)
 			t.Close()
 			return
 		}
 		switch frame := frame.(type) {
 		case *http2.MetaHeadersFrame:
 			if t.operateHeaders(frame, handle, traceCtx) {
+				fmt.Println("[HandleStreams] close stream for MetaHeadersFrame", err)
 				t.Close()
 				break
 			}
@@ -503,6 +518,32 @@ func (t *http2Server) HandleStreams(handle func(*Stream), traceCtx func(context.
 			// TODO: Handle GoAway from the client appropriately.
 		default:
 			errorf("transport: http2Server.HandleStreams found unhandled frame type %v.", frame)
+		}
+	}
+}
+
+func extractPortFromErr(err error) {
+	re := regexp.MustCompile(`read tcp .*->.*:(\d+):`)
+	match := re.FindStringSubmatch(err.Error())
+	port := ""
+	if len(match) == 2 {
+		port = match[1]
+	}
+
+	if port != "" {
+		cmd := exec.Command("netstat", "-nal")
+		output, err := cmd.Output()
+		if err != nil {
+			fmt.Printf("Failed to execute command: %v\n", err)
+			return
+		}
+
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, port) {
+				fmt.Println("Command output: ", line)
+				continue
+			}
 		}
 	}
 }
@@ -634,6 +675,7 @@ func (t *http2Server) handleData(f *http2.DataFrame) {
 func (t *http2Server) handleRSTStream(f *http2.RSTStreamFrame) {
 	// If the stream is not deleted from the transport's active streams map, then do a regular close stream.
 	if s, ok := t.getStream(f); ok {
+		fmt.Println("handleRSTStream delete stream", s.method, len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 		t.closeStream(s, false, 0, false)
 		return
 	}
@@ -713,19 +755,73 @@ func (t *http2Server) handlePing(f *http2.PingFrame) {
 		// Keepalive shouldn't be active thus, this new ping should
 		// have come after at least defaultPingTimeout.
 		if t.lastPingAt.Add(defaultPingTimeout).After(now) {
+			fmt.Println("check strike in default", ns, t.kep.PermitWithoutStream, t.pingStrikes, t.lastPingAt, t.kep.MinTime, now, defaultPingTimeout, f.Data == bdpPing.data, f.Data == goAwayPing.data, t.remoteAddr, t.localAddr)
+			//t.printFrame(f)
 			t.pingStrikes++
 		}
 	} else {
 		// Check if keepalive policy is respected.
 		if t.lastPingAt.Add(t.kep.MinTime).After(now) {
+			fmt.Println("check strike in minTime", ns, t.kep.PermitWithoutStream, t.pingStrikes, t.lastPingAt, t.kep.MinTime, now, defaultPingTimeout, f.Data == bdpPing.data, f.Data == goAwayPing.data)
+			//t.printFrame(f)
 			t.pingStrikes++
 		}
 	}
 
 	if t.pingStrikes > maxPingStrikes {
+		fmt.Println("check strike", ns, t.kep.PermitWithoutStream, t.pingStrikes, t.lastPingAt, t.kep.MinTime, now, defaultPingTimeout, f.Data == bdpPing.data, f.Data == goAwayPing.data, t.remoteAddr, t.localAddr)
 		// Send goaway and close the connection.
-		errorf("transport: Got too many pings from the client, closing the connection.")
+		errorf("transport: Got too many pings from the client, closing the connection. %s", f.String())
+		//t.printFrame(f)
+
 		t.controlBuf.put(&goAway{code: http2.ErrCodeEnhanceYourCalm, debugData: []byte("too_many_pings"), closeConn: true})
+	}
+
+	if f.Data == bdpPing.data {
+		fmt.Println("bdp ping received", ns, t.kep.PermitWithoutStream, t.pingStrikes, t.lastPingAt, t.kep.MinTime, now, defaultPingTimeout)
+	}
+}
+
+func (t *http2Server) printFrame(f *http2.PingFrame) {
+	extractPort(t.localAddr.String())
+	fmt.Printf("local addr is: %s, remote addr is: %s\n", t.localAddr.String(), t.remoteAddr.String())
+	extractPort(t.remoteAddr.String())
+
+	output := fmt.Sprintf("events: %s, isAck: %v, header: %s, frame: %s",
+		t.events, f.IsAck(), f.Header(), f.String())
+	activeStreams := ""
+	if f != nil {
+		output = fmt.Sprintf("check id: %d, %s", f.Header().StreamID, output)
+		for _, s := range t.streams {
+			output = fmt.Sprintf("stream name %s and is %v, %s", s.method, s, output)
+		}
+		for _, s := range t.activeStreams {
+			activeStreams = fmt.Sprintf("stream name %s and is %v, %s", s.method, s, activeStreams)
+		}
+	}
+
+	fmt.Println("all streams are", output)
+	fmt.Println("active streams are", activeStreams)
+	fmt.Println("--------------------------")
+}
+
+func extractPort(str string) {
+	re := regexp.MustCompile(`.*:(\d+)$`)
+	match := re.FindStringSubmatch(str)
+	port := ""
+	if len(match) == 2 {
+		port = match[1]
+	}
+
+	if port != "" {
+		cmd := exec.Command("lsof", "-i", "tcp:"+port)
+		output, err := cmd.Output()
+		if err != nil {
+			fmt.Printf("Failed to execute command: %v\n", err)
+			return
+		}
+
+		fmt.Println("Command output: ", string(output))
 	}
 }
 
@@ -954,7 +1050,8 @@ func (t *http2Server) keepalive() {
 	// Initialize the different timers to their default values.
 	idleTimer := time.NewTimer(t.kp.MaxConnectionIdle)
 	ageTimer := time.NewTimer(t.kp.MaxConnectionAge)
-	kpTimer := time.NewTimer(t.kp.Time)
+	changeTime := t.kp.Time - 3
+	kpTimer := time.NewTimer(changeTime)
 	defer func() {
 		// We need to drain the underlying channel in these timers after a call
 		// to Stop(), only if we are interested in resetting them. Clearly we
@@ -990,23 +1087,25 @@ func (t *http2Server) keepalive() {
 			case <-ageTimer.C:
 				// Close the connection after grace period.
 				infof("transport: closing server transport due to maximum connection age.")
+				fmt.Println("[HandleStreams] transport: closing server transport due to maximum connection age.")
 				t.Close()
 			case <-t.done:
 			}
 			return
 		case <-kpTimer.C:
 			lastRead := atomic.LoadInt64(&t.lastRead)
+			fmt.Println("check for timer", time.Now(), lastRead, prevNano, outstandingPing, t.localAddr.String(), t.remoteAddr.String())
 			if lastRead > prevNano {
 				// There has been read activity since the last time we were
 				// here. Setup the timer to fire at kp.Time seconds from
 				// lastRead time and continue.
 				outstandingPing = false
-				kpTimer.Reset(time.Duration(lastRead) + t.kp.Time - time.Duration(time.Now().UnixNano()))
+				kpTimer.Reset(time.Duration(lastRead) + changeTime - time.Duration(time.Now().UnixNano()))
 				prevNano = lastRead
 				continue
 			}
 			if outstandingPing && kpTimeoutLeft <= 0 {
-				infof("transport: closing server transport due to idleness.")
+				fmt.Println("transport: closing server transport due to idleness.")
 				t.Close()
 				return
 			}
@@ -1014,6 +1113,7 @@ func (t *http2Server) keepalive() {
 				if channelz.IsOn() {
 					atomic.AddInt64(&t.czData.kpCount, 1)
 				}
+				fmt.Println("server keepalive: sending ping", time.Now())
 				t.controlBuf.put(p)
 				kpTimeoutLeft = t.kp.Timeout
 				outstandingPing = true
@@ -1022,7 +1122,7 @@ func (t *http2Server) keepalive() {
 			// timeoutLeft. This will ensure that we wait only for kp.Time
 			// before sending out the next ping (for cases where the ping is
 			// acked).
-			sleepDuration := minTime(t.kp.Time, kpTimeoutLeft)
+			sleepDuration := minTime(changeTime, kpTimeoutLeft)
 			kpTimeoutLeft -= sleepDuration
 			kpTimer.Reset(sleepDuration)
 		case <-t.done:
@@ -1042,6 +1142,7 @@ func (t *http2Server) Close() error {
 	}
 	t.state = closing
 	streams := t.activeStreams
+	fmt.Println("close stream", time.Now(), t.remoteAddr, t.localAddr)
 	t.activeStreams = nil
 	t.mu.Unlock()
 	t.controlBuf.finish()
@@ -1070,6 +1171,7 @@ func (t *http2Server) deleteStream(s *Stream, eosReceived bool) {
 
 	t.mu.Lock()
 	if _, ok := t.activeStreams[s.id]; ok {
+		fmt.Println("delete stream", len(t.activeStreams), time.Now(), s.id, s.method, t.remoteAddr, t.localAddr)
 		delete(t.activeStreams, s.id)
 		if len(t.activeStreams) == 0 {
 			t.idle = time.Now()
@@ -1099,6 +1201,7 @@ func (t *http2Server) finishStream(s *Stream, rst bool, rstCode http2.ErrCode, h
 		rst:      rst,
 		rstCode:  rstCode,
 		onWrite: func() {
+			fmt.Println("[finishStream] clean up stream", s.id, rst, rstCode, eosReceived, s.method, len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 			t.deleteStream(s, eosReceived)
 		},
 	}
@@ -1108,6 +1211,7 @@ func (t *http2Server) finishStream(s *Stream, rst bool, rstCode http2.ErrCode, h
 // closeStream clears the footprint of a stream when the stream is not needed any more.
 func (t *http2Server) closeStream(s *Stream, rst bool, rstCode http2.ErrCode, eosReceived bool) {
 	s.swapState(streamDone)
+	fmt.Println("close stream", s.id, s.method, rstCode, eosReceived, len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 	t.deleteStream(s, eosReceived)
 
 	t.controlBuf.put(&cleanupStream{
@@ -1122,6 +1226,10 @@ func (t *http2Server) RemoteAddr() net.Addr {
 	return t.remoteAddr
 }
 
+func (t *http2Server) LocalAddr() net.Addr {
+	return t.localAddr
+}
+
 func (t *http2Server) Drain() {
 	t.drain(http2.ErrCodeNo, []byte{})
 }
@@ -1133,6 +1241,7 @@ func (t *http2Server) drain(code http2.ErrCode, debugData []byte) {
 		return
 	}
 	t.drainChan = make(chan struct{})
+	fmt.Println("[drain] drain", len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 	t.controlBuf.put(&goAway{code: code, debugData: debugData, headsUp: true})
 }
 
@@ -1155,6 +1264,7 @@ func (t *http2Server) outgoingGoAwayHandler(g *goAway) (bool, error) {
 			g.closeConn = true
 		}
 		t.mu.Unlock()
+		fmt.Println("outgoingGoAwayHandler write go away", sid, g.code, g.debugData, g.closeConn, len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 		if err := t.framer.fr.WriteGoAway(sid, g.code, g.debugData); err != nil {
 			return false, err
 		}
@@ -1188,6 +1298,7 @@ func (t *http2Server) outgoingGoAwayHandler(g *goAway) (bool, error) {
 		case <-t.done:
 			return
 		}
+		fmt.Println("outgoingGoAwayHandler write second go away", sid, g.code, g.debugData, g.closeConn, len(t.activeStreams), time.Now(), t.remoteAddr, t.localAddr)
 		t.controlBuf.put(&goAway{code: g.code, debugData: g.debugData})
 	}()
 	return false, nil

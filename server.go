@@ -405,10 +405,10 @@ func NewServer(opt ...ServerOption) *Server {
 		czData: new(channelzData),
 	}
 	s.cv = sync.NewCond(&s.mu)
-	if EnableTracing {
-		_, file, line, _ := runtime.Caller(1)
-		s.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
-	}
+	//if EnableTracing {
+	_, file, line, _ := runtime.Caller(1)
+	s.events = trace.NewEventLog("grpc.Server", fmt.Sprintf("%s:%d", file, line))
+	//}
 
 	if channelz.IsOn() {
 		s.channelzID = channelz.RegisterServer(&channelzServer{s}, "")
@@ -421,6 +421,7 @@ func NewServer(opt ...ServerOption) *Server {
 func (s *Server) printf(format string, a ...interface{}) {
 	if s.events != nil {
 		s.events.Printf(format, a...)
+		fmt.Printf("check for server events!!!\n"+format, a...)
 	}
 }
 
@@ -429,6 +430,7 @@ func (s *Server) printf(format string, a ...interface{}) {
 func (s *Server) errorf(format string, a ...interface{}) {
 	if s.events != nil {
 		s.events.Errorf(format, a...)
+		fmt.Printf("check for server events error!!!\n"+format, a...)
 	}
 }
 
@@ -447,7 +449,7 @@ func (s *Server) RegisterService(sd *ServiceDesc, ss interface{}) {
 func (s *Server) register(sd *ServiceDesc, ss interface{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.printf("RegisterService(%q)", sd.ServiceName)
+	//s.printf("RegisterService(%q)", sd.ServiceName)
 	if s.serve {
 		grpclog.Fatalf("grpc: Server.RegisterService after Server.Serve for %q", sd.ServiceName)
 	}
@@ -556,7 +558,7 @@ func (l *listenSocket) Close() error {
 // Serve will return a non-nil error unless Stop or GracefulStop is called.
 func (s *Server) Serve(lis net.Listener) error {
 	s.mu.Lock()
-	s.printf("serving")
+	s.printf("serving %s\n", lis.Addr().String())
 	s.serve = true
 	if s.lis == nil {
 		// Serve called after Stop or GracefulStop.
@@ -698,6 +700,7 @@ func (s *Server) newHTTP2Transport(c net.Conn, authInfo credentials.AuthInfo) tr
 		ChannelzParentID:      s.channelzID,
 		MaxHeaderListSize:     s.opts.maxHeaderListSize,
 		HeaderTableSize:       s.opts.headerTableSize,
+		Events:                s.events,
 	}
 	st, err := transport.NewServerTransport("http2", c, config)
 	if err != nil {
@@ -745,12 +748,12 @@ var _ http.Handler = (*Server)(nil)
 // To share one port (such as 443 for https) between gRPC and an
 // existing http.Handler, use a root http.Handler such as:
 //
-//   if r.ProtoMajor == 2 && strings.HasPrefix(
-//   	r.Header.Get("Content-Type"), "application/grpc") {
-//   	grpcServer.ServeHTTP(w, r)
-//   } else {
-//   	yourMux.ServeHTTP(w, r)
-//   }
+//	if r.ProtoMajor == 2 && strings.HasPrefix(
+//		r.Header.Get("Content-Type"), "application/grpc") {
+//		grpcServer.ServeHTTP(w, r)
+//	} else {
+//		yourMux.ServeHTTP(w, r)
+//	}
 //
 // Note that ServeHTTP uses Go's HTTP/2 server implementation which is totally
 // separate from grpc-go's HTTP/2 server. Performance and features may vary
@@ -798,6 +801,7 @@ func (s *Server) addConn(st transport.ServerTransport) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.conns == nil {
+		fmt.Println("[addConn] close transport")
 		st.Close()
 		return false
 	}
@@ -1489,9 +1493,9 @@ func (s *Server) getCodec(contentSubtype string) baseCodec {
 // SetHeader sets the header metadata.
 // When called multiple times, all the provided metadata will be merged.
 // All the metadata will be sent out when one of the following happens:
-//  - grpc.SendHeader() is called;
-//  - The first response is sent out;
-//  - An RPC status is sent out (error or success).
+//   - grpc.SendHeader() is called;
+//   - The first response is sent out;
+//   - An RPC status is sent out (error or success).
 func SetHeader(ctx context.Context, md metadata.MD) error {
 	if md.Len() == 0 {
 		return nil
